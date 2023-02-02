@@ -1,5 +1,5 @@
 # Metapangenomes Oman 2020
-Scripts and workflows supporting Thieringer et al. (2023) on metapangenomic investigation of methanogenic populations in the Samail Ophiolite of Oman.
+Scripts, workflows, and data supporting Thieringer et al. (2023) on metapangenomic investigation of methanogenic populations in the Samail Ophiolite of Oman.
 
 
 The MAGs can be found at NCBI project number:
