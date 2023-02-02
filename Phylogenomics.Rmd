@@ -1,0 +1,95 @@
+---
+title: "Thieringer et al. 2023 - Phylogenomic Analyses of Methanobacterium and Anaerolineaceae MAGs"
+output: html_notebook
+---
+
+# Methanobacterium
+
+Going to create a tree using the GTDB database and not include specific genomes dowloaded from NCBI.
+
+First going to just look within the Methanobacteriaeceae family to provide an overview of where the MAGs land. Going to include Methanoscarcina barkeri as an outgroup for better constraining the tree.
+
+Creating the accession file from GTDB for Methanobacteriaeceae
+```{bash}
+# This will provide a summary table with the accessions
+gtt-get-accessions-from-GTDB -t Methanobacteriaceae --GTDB-representatives-only
+```
+
+Downloading a reference genome for the outgroup
+```{bash}
+# I did this through the NCBI portal and ran this search result:
+# Methanosarcina barkeri[ORGN] AND "latest refseq"[filter] AND "complete genome"[filter] 
+```
+
+Running GtoTree
+```{bash}
+GToTree -a accession.txt -f fasta.txt -H Archaea -D -j 4 -o Methanobacterium_tree
+```
+RUN TIME: 1 hour 10 minutes
+
+
+Taking this into IQ-TREE
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=PT_IQ-TREE
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=pthieringer@mines.edu
+#SBATCH -N 1            #Nodes
+#SBATCH -n 1           #Cores
+#SBATCH -A 2203121047
+#SBATCH --cpus-per-task=8
+#SBATCH -t 72:00:00
+#SBATCH -e IQ-Tree_methano.err
+#SBATCH -o IQ-Tree_methano.out
+
+# LOAD MODULES AND CONDA ENVIRONMENTS
+ml apps/python3/2020.02
+conda activate phylogenomics
+
+# PIPELINE
+cd /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/09_PHYLOGENOMICS/METHANOBACTERIUM
+
+iqtree -s Methanobacterium_tree/Aligned_SCGs_mod_names.faa -spp Methanobacterium_tree/run_files/Partitions.txt -T 8 -m TEST -B 1000 --prefix Methanobacterium_iqtree
+```
+
+Can then take the tree file for visualization.
+
+
+# Anaerolilneaceae
+
+Downloading all GTDB accessions from the family level
+```{bash}
+# This will provide a summary table with the accessions
+gtt-get-accessions-from-GTDB -t Anaerolineaceae --GTDB-representatives-only
+```
+
+Downloaded Thermotogota genomes as an outgroup and subsetted at the order level. I will then add these genomes to the accession_family.txt file. Then I can run GtoTree as normal.
+
+
+Taking into IQ-Tree
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=PT_IQ-TREE
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=pthieringer@mines.edu
+#SBATCH -N 1            #Nodes
+#SBATCH -n 1           #Cores
+#SBATCH -A 2203121047
+#SBATCH --cpus-per-task=36
+#SBATCH -t 56:00:00
+#SBATCH -e IQ-Tree.err
+#SBATCH -o IQ-Tree.out
+
+# LOAD MODULES AND CONDA ENVIRONMENTS
+ml apps/python3/2020.02
+conda activate phylogenomics
+
+# PIPELINE
+cd /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/09_PHYLOGENOMICS/ANAEROLINEACEAE
+
+# Family
+iqtree -s Anaerolineaceae_tree/Aligned_SCGs_mod_names.faa -spp Anaerolineaceae_tree/run_files/Partitions.txt -T 36 -m TEST -B 1000 --prefix Anaerolineaceae_iqtree
+```
+
+
+The tree file can then be taken into iTOL for visualization.

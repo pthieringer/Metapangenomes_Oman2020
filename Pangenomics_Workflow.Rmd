@@ -1,0 +1,908 @@
+---
+title: Thieringer et al. 2023 - Insights into pH adaptation and energy utilization
+  from metapangenomic investigation in the subsurface serpentinizing environment of
+  the Samail Ophiolite, Oman
+---
+
+This is the bioinformatic pipeline for processing the metagenomic and pangenomic data used in this study. This workflow is largely based off of the workflows provided on the Anvi'o website and Daniel Utter's metapangenomic pipeline (https://dutter.github.io/projects/oral_metapan) - who we are deeply indebted and thankful to for their support and dedication for sharing accessible and reproducible workflows.
+
+Our study investigated the adaptation strategies that Methanobacterium populations employ over a range of pH and other geochemical conditions within the Samail Ophiolite, Oman. This workflow will show the overall path of how samples were processed.
+
+All of the code below was run using a Slurm scheduler at the Colorado School of Mines supercomputing cluster. The slurm headers are included to provide a sense of how much memory and time was requested, but the run time is also noted for reference. Some code is more streamlined (using for loops, for instance) as the process became more intuitive. In order to access files, either the rsync command was used to download locally or the Globus transfer web browser was used for larger files.
+
+All of the bioinformatic software was either installed through the module system set up by the system administrators or installed as a conda environment (instructions for installing conda environments can be found on most programs' Github page or similar).
+
+
+# INDIVIDUAL ASSEMBLY
+
+The decision was made to use an individual assembly in order to contrast population level differences in Methanobacterium from different subsurface fluid depths and wells. The non-error corrected files were chosen for this project in order to try and retain as much information as possible in the sequencing data, since these samples are low biomass samples.
+
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=PT_assembly_metaSpades_nonerror
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=pthieringer@mines.edu
+#SBATCH -N 1            #Nodes
+#SBATCH -n 24           #Cores
+#SBATCH -A 2203121047
+#SBATCH --mem=372GB
+#SBATCH -t 120:00:00
+#SBATCH -e metaspades_nonerr.err
+#SBATCH -o metaspades_nonerr.out
+
+# LOAD NECESSARY MODULES TO RUN SPADES
+ml compilers/gcc/9.3.1
+ml utility/standard/bzip2/1.0.8
+ml apps/python3/2020.02
+ml apps/SPAdes/3.15.4
+
+# RUN PIPELINE
+cd /u/sa/br/pthieringer/scratch/01_Metagenome_Files/
+
+spades.py -1 BA3A_100M_R1.fastq.gz -2 BA3A_100M_R2.fastq.gz -o /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/01_ASSEMBLIES/NON_ERROR/BA3A_100M -t 50 -m 372 -k 21,33,55,77,99,121 --only-assembler --meta
+
+spades.py -1 BA3A_275M_R1.fastq.gz -2 BA3A_275M_R2.fastq.gz -o /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/01_ASSEMBLIES/NON_ERROR/BA3A_275M -t 50 -m 372 -k 21,33,55,77,99,121 --only-assembler --meta
+
+spades.py -1 BA3A_75M_R1.fastq.gz -2 BA3A_75M_R2.fastq.gz -o /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/01_ASSEMBLIES/NON_ERROR/BA3A_75M -t 50 -m 372 -k 21,33,55,77,99,121 --only-assembler --meta
+
+spades.py -1 NSHQ14_9_30M_R1.fastq.gz -2 NSHQ14_9_30M_R2.fastq.gz -o /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/01_ASSEMBLIES/NON_ERROR/NSHQ14_9_30M -t 50 -m 372 -k 21,33,55,77,99,121 --only-assembler --meta
+
+spades.py -1 WAB188_50M_R1.fastq.gz -2 WAB188_50M_R2.fastq.gz -o /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/01_ASSEMBLIES/NON_ERROR/WAB188_50M -t 50 -m 372 -k 21,33,55,77,99,121 --only-assembler --meta
+
+```
+RUN TIME: ~55 hours
+
+
+From here, I performed a metaquast check of the run to see the score results/statistics. The html file output can be downloaded to view the score results in the output that metaquast provides. Mostly making sure here that nothing seems off in the assembly. 
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=PT_MetaQuast
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=pthieringer@mines.edu
+#SBATCH -N 1            #Nodes
+#SBATCH -n 1           #Cores
+#SBATCH -A 2203121047
+#SBATCH --cpus-per-task=36
+#SBATCH -t 2:00:00
+#SBATCH -e MetaQuast_report.err
+#SBATCH -o MetaQuast_report.out
+
+# LOAD MODULES AND CONDA ENVIRONMENTS
+ml apps/python3/anaconda
+conda activate quast
+
+# RUN PIPELINE
+
+cd /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/01_ASSEMBLIES/NON_ERROR
+
+metaquast -o metaQuast_output -l "BA3A_100M, BA3A_275M, BA3A_75M, NSHQ14_9_30M, WAB188_50M" -t 8 -m 1000 BA3A_100M/contigs.fasta BA3A_275M/contigs.fasta BA3A_75M/contigs.fasta NSHQ14_9_30M/contigs.fasta WAB188_50M/contigs.fasta --max-ref-number 0
+```
+RUN TIME: 20 minutes
+
+
+# BAM FILES & MAPPING
+Need to generate build files, assemblies, and bam files for each of the individual contigs. Going to need to create "for" loops because it will get redundant and painful to go through all of the files as I did manually in the above code. The "SAMPLE_LIST" mentioned here and the code for the rest of this workflow just contains the names for the headers of the different samples (e.g. BA3A_75M, NSHQ14_9_30M, WAB188_50M, etc.). It should also be noted I list the full path for files throughout the code I meniton here in this workflow for most steps, and this could be simplified by putting path variables...however, a lot of this code was initially generated from a naive and newly forming bioinformaticist, so bear with me please.
+
+First removing any deflines that may exist.
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=PT_Fixed_Contigs
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=pthieringer@mines.edu
+#SBATCH -N 1            #Nodes
+#SBATCH -n 1           #Cores
+#SBATCH -A 2203121047
+#SBATCH --ntasks-per-node=8
+#SBATCH -t 1:00:00
+#SBATCH -e Fixed_Contigs.err
+#SBATCH -o Fixed_Contigs.out
+
+# LOAD MODULES AND CONDA ENVIRONMENTS
+ml apps/python3/anaconda
+conda activate anvio-7.1
+
+# RUN PIPELINE
+cd /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/
+for sample in `cat SAMPLE_LIST`; 
+do cd /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/01_ASSEMBLIES/NON_ERROR/$sample
+anvi-script-reformat-fasta contigs.fasta -o fixed_contigs.fasta -l 1000 --simplify-names;
+done
+```
+RUN TIME: 5 minutes
+
+
+Now going to generate Bowtie2 build files.
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=PT_Bowtie2_Build
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=pthieringer@mines.edu
+#SBATCH -N 1            #Nodes
+#SBATCH -n 1           #Cores
+#SBATCH -A 2203121047
+#SBATCH --ntasks-per-node=36
+#SBATCH -t 1:00:00
+#SBATCH -e bowtie_build.err
+#SBATCH -o bowtie_build.out
+
+# LOAD MODULES AND CONDA ENVIRONMENTS
+ml apps/python3/2020.02
+conda activate anvio-7.1
+
+# RUN PIPELINE
+cd /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/
+for sample in `cat SAMPLE_LIST`;
+do cd /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/01_ASSEMBLIES/NON_ERROR/$sample
+bowtie2-build fixed_contigs.fasta /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/02_MAPPING/$sample/assembly_$sample;
+done
+```
+RUN TIME: 26 minutes
+
+
+Now to create the mapping files. Must first create a large sam file and convert it to a bam file (keep the bam.bai files - this is important in downstream applications). The sam file can be removed since it is large and not needed for downstream application.
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=PT_Bowtie2_Mapping
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=pthieringer@mines.edu
+#SBATCH -N 1            #Nodes
+#SBATCH -n 1           #Cores
+#SBATCH -A 2203121047
+#SBATCH --cpus-per-task=8
+#SBATCH -t 72:00:00
+#SBATCH -e bowtie_mapping.err
+#SBATCH -o bowtie_mapping.out
+
+# LOAD MODULES AND CONDA ENVIRONMENTS
+ml apps/python3/2020.02
+conda activate anvio-7.1
+
+# RUN PIPELINE
+cd /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/
+for sample in `cat SAMPLE_LIST`;
+do bowtie2 -x /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/02_MAPPING/$sample/assembly_$sample -1 /u/sa/br/pthieringer/scratch/01_Metagenome_Files/$sample.R1.fastq.gz -2 /u/sa/br/pthieringer/scratch/01_Metagenome_Files/$sample.R2.fastq.gz --no-unal --threads 8 -S /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/02_MAPPING/$sample/$sample.sam
+
+samtools view -b -o /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/02_MAPPING/$sample/raw_$sample.bam /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/02_MAPPING/$sample/$sample.sam
+
+anvi-init-bam /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/02_MAPPING/$sample/raw_$sample.bam -o /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/02_MAPPING/$sample/$sample.bam
+rm /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/02_MAPPING/$sample/$sample.sam
+rm /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/02_MAPPING/$sample/raw_$sample.bam;
+done
+
+# JOB COMPLETE
+```
+RUN TIME: 33 hours
+
+
+# CONTIGS DATABASES
+From here, the workflow will now resemble the Anvi'o workflows and pipelines in order to create downstream profile databases and pangenome profiles.
+
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=PT_Contigs_Database
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=pthieringer@mines.edu
+#SBATCH -N 1            #Nodes
+#SBATCH -n 1           #Cores
+#SBATCH -A 2203121047
+#SBATCH --cpus-per-task=16
+#SBATCH -t 12:00:00
+#SBATCH -e contigs_database.err
+#SBATCH -o contigs_database.out
+
+# LOAD MODULES AND CONDA ENVIRONMENTS
+ml apps/python3/2020.02
+conda activate anvio-7.1
+
+# RUN PIPELINE
+cd /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/
+for sample in `cat SAMPLE_LIST`;
+do anvi-gen-contigs-database -f /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/01_ASSEMBLIES/NON_ERROR/$sample/fixed_contigs.fasta -o /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/03_CONTIGS_DATABASES/$sample/contigs.db -n "$sample";
+done
+```
+RUN TIME: 4 hours
+
+
+# FUNCTIONAL ANNOTATIONS
+
+Here, I am applying all of the functional annotations for the contigs/genes from: HMM, COGS, PFAM, and GhostKOALA. GhostKOALA will need to be applied through a website, downloaded and then run on the samples separately. This first step will apply the first three annotations to our metagenomes.
+
+
+HMM, COGS, PFAM Annotations
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=PT_Functional_Anno1
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=pthieringer@mines.edu
+#SBATCH -N 1            #Nodes
+#SBATCH -n 1           #Cores
+#SBATCH -A 2203121047
+#SBATCH --ntasks-per-node=8
+#SBATCH -t 24:00:00
+#SBATCH -e functional_anno1.err
+#SBATCH -o functional_anno1.out
+
+# LOAD MODULES AND CONDA ENVIRONMENTS
+ml apps/python3/2020.02
+conda activate anvio-7.1
+
+# RUN PIPELINE
+cd /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/
+for sample in `cat SAMPLE_LIST`;
+do anvi-run-hmms -c /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/03_CONTIGS_DATABASES/$sample/contigs.db -T 4
+
+anvi-run-ncbi-cogs -c /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/03_CONTIGS_DATABASES/$sample/contigs.db -T 4
+
+anvi-run-pfams -c /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/03_CONTIGS_DATABASES/$sample/contigs.db -T 4;
+done
+```
+RUN TIME: 10 hours
+
+
+Getting the amino acid and DNA sequence files that are needed for GhostKOALA (and some other annotation programs downstream).
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=PT_AA_Sequences
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=pthieringer@mines.edu
+#SBATCH -N 1            #Nodes
+#SBATCH -n 1           #Cores
+#SBATCH -A 2203121047
+#SBATCH --cpus-per-task=8
+#SBATCH -t 8:00:00
+#SBATCH -e AA_Sequences.err
+#SBATCH -o AA_Sequences.out
+
+# LOAD MODULES AND CONDA ENVIRONMENTS
+ml apps/python3/2020.02
+conda activate anvio-7.1
+
+# RUN PIPELINE
+cd /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/
+for sample in `cat SAMPLE_LIST`;
+do anvi-get-sequences-for-gene-calls -c /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/03_CONTIGS_DATABASES/$sample/contigs.db -o /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/03_CONTIGS_DATABASES/$sample/gene_calls.fa # This one is used for taxonomic annotation
+
+anvi-get-sequences-for-gene-calls -c /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/03_CONTIGS_DATABASES/$sample/contigs.db --get-aa-sequences -o /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/03_CONTIGS_DATABASES/$sample/protein_sequences_$sample.fa # This one is used for GhostKoala;
+done
+```
+RUN TIME: 10 minutes
+
+
+The protein sequence files are now corrected before being uploaded to the GhostKOALA website.
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=PT_Fix_Sequences
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=pthieringer@mines.edu
+#SBATCH -N 1            #Nodes
+#SBATCH -n 1           #Cores
+#SBATCH -A 2203121047
+#SBATCH --ntasks-per-node=8
+#SBATCH -t 0:10:00
+#SBATCH -e Fix_Sequences.err
+#SBATCH -o Fix_Sequences.out
+
+# RUN PIPELINE
+cd /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/
+for sample in `cat SAMPLE_LIST`;
+do sed -i 's/>/>genecall_/' /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/03_CONTIGS_DATABASES/$sample/protein_sequences_$sample.fa;
+done
+```
+RUN TIME: 30 seconds
+
+
+The protein sequences file is then uploaded to the GhostKOALA server to be run. Once the annotations are complete, the files will be named "user_ko.txt" which then needs to be run through the GhostKOALA parser and imported to the contigs database.
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=PT_GhostKoala
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=pthieringer@mines.edu
+#SBATCH -N 1            #Nodes
+#SBATCH -n 1           #Cores
+#SBATCH -A 2203121047
+#SBATCH --cpus-per-task=8
+#SBATCH -t 1:00:00
+#SBATCH -e GhostKoala.err
+#SBATCH -o GhostKoala.out
+
+# LOAD MODULES AND CONDA ENVIRONMENTS
+ml apps/python3/2020.02
+conda activate anvio-7.1
+
+# RUN PIPELINE
+cd /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/
+for sample in `cat SAMPLE_LIST`;
+do python3 /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/GHOSTKOALA/GhostKoalaParser/KEGG-to-anvio --KeggDB /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/GHOSTKOALA/GhostKoalaParser/KO_Orthology_ko00001.txt -i /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/03_CONTIGS_DATABASES/$sample/user_ko.txt -o /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/03_CONTIGS_DATABASES/$sample/KeggAnnotations_AnviImportable.txt
+
+anvi-import-functions -c /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/03_CONTIGS_DATABASES/$sample/contigs.db -i /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/03_CONTIGS_DATABASES/$sample/KeggAnnotations_AnviImportable.txt;
+done
+```
+RUN TIME: 3 minutes
+
+
+Running Interproscan which will include from other annotation software. 
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=PT_Interproscan
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=pthieringer@mines.edu
+#SBATCH -N 1            #Nodes
+#SBATCH -n 1           #Cores
+#SBATCH -A 2203121047
+#SBATCH --cpus-per-task=36
+#SBATCH -t 24:00:00
+#SBATCH -e Interproscan_anno.err
+#SBATCH -o Interproscan_anno.out
+
+# LOAD MODULES AND CONDA ENVIRONMENTS
+ml apps/python3/2020.02
+conda activate java
+
+# RUN PIPELINE
+cd /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/
+for sample in `cat SAMPLE_LIST`;
+do bash /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/INTERPROSCAN/interproscan-5.56-89.0/interproscan.sh -i /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/03_CONTIGS_DATABASES/$sample/protein_sequences_$sample.fa -f tsv -o /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/03_CONTIGS_DATABASES/$sample/interpro-output.tsv -appl TIGRFAM,SUPERFAMILY;
+done
+```
+RUN TIME: 20 hours
+
+
+I then had to remove the "genecalls_" prefix for Anvi'o to recognize it. The below code was run manually on each output generated from Interproscan.
+```{bash}
+sed 's/genecall_//g' interpro_output_fixed_iprs2anvio.tsv > interpro_for_anvio.tsv
+```
+
+
+Importing the Interproscan results to the Anvi'o contigs database file.
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=PT_Interproscan_Import
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=pthieringer@mines.edu
+#SBATCH -N 1            #Nodes
+#SBATCH -n 1           #Cores
+#SBATCH -A 2203121047
+#SBATCH --ntasks-per-node=8
+#SBATCH -t 1:00:00
+#SBATCH -e Interproscan_import.err
+#SBATCH -o Interproscan_import.out
+
+# LOAD MODULES AND CONDA ENVIRONMENTS
+ml apps/python3/2020.02
+conda activate anvio-7.1
+
+# RUN PIPELINE
+cd /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/
+for sample in `cat SAMPLE_LIST`;
+do anvi-import-functions -c /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/03_CONTIGS_DATABASES/$sample/contigs.db -i /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/03_CONTIGS_DATABASES/$sample/interpro_for_anvio.tsv;
+done
+```
+RUN TIME: 5 minutes
+
+
+
+# TAXANOMIC ANNOTATION
+
+Going to use Kaiju to initially annotate taxonomy. This helps with identification of bins for Methanobacterium and Anaerolineaceae that were needed in later steps. Those bins (MAGs) were then processed through GTDB-tk to provide a more robust taxonomic annotation.
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=PT_Kaiju
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=pthieringer@mines.edu
+#SBATCH -N 1            #Nodes
+#SBATCH -n 1           #Cores
+#SBATCH -A 2203121047
+#SBATCH --ntasks-per-node=8
+#SBATCH -t 12:00:00
+#SBATCH -e Kaiju_anno.err
+#SBATCH -o Kaiju_anno.out
+
+# LOAD MODULES AND CONDA ENVIRONMENTS
+ml apps/python3/2020.02
+
+# RUN PIPELINE
+cd /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/
+for sample in `cat SAMPLE_LIST`;
+do /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/KAIJU/kaiju/bin/kaiju -t /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/KAIJU/kaiju/nodes.dmp -f /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/KAIJU/kaiju/kaiju_db_nr.fmi -i /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/03_CONTIGS_DATABASES/$sample/gene_calls.fa -o /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/03_CONTIGS_DATABASES/$sample/gene_calls_nr.out -z 30 -v
+/u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/KAIJU/kaiju/bin/addTaxonNames -t /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/KAIJU/kaiju/nodes.dmp -n /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/KAIJU/kaiju/names.dmp -i /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/03_CONTIGS_DATABASES/$sample/gene_calls_nr.out -o /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/03_CONTIGS_DATABASES/$sample/gene_calls_nr.names -r superkingdom,phylum,order,class,family,genus,species;
+done
+
+# JOB COMPLETE
+```
+RUN TIME: 30 minutes
+
+
+Importing the taxonomic results to the contigs databases.
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=PT_Kaiju_Import
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=pthieringer@mines.edu
+#SBATCH -N 1            #Nodes
+#SBATCH -n 1           #Cores
+#SBATCH -A 2203121047
+#SBATCH --cpus-per-task=36
+#SBATCH -t 1:00:00
+#SBATCH -e Kaiju_Import.err
+#SBATCH -o Kaiju_Import.out
+
+# LOAD MODULES AND CONDA ENVIRONMENTS
+ml apps/python3/2020.02
+conda activate anvio-7.1
+
+# RUN PIPELINE
+cd /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/
+for sample in `cat SAMPLE_LIST`;
+do anvi-import-taxonomy-for-genes -i /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/03_CONTIGS_DATABASES/$sample/gene_calls_nr.names -c /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/03_CONTIGS_DATABASES/$sample/contigs.db -p kaiju --just-do-it;
+done
+
+# JOB COMPLETE
+```
+RUN TIME: 2 minutes
+
+
+# ANVIO PROFILES
+
+Here is where all of the anvio profiles will be created. The profiles will be stored in a new folder as well. There will not be a merging step since all of the profiles come from their own individual contigs database (not a co-assembly approach).
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=PT_Profiles
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=pthieringer@mines.edu
+#SBATCH -N 1           #Nodes
+#SBATCH -n 1           #Cores
+#SBATCH -A 2203121047
+#SBATCH --ntasks-per-node=16
+#SBATCH -t 2:00:00
+#SBATCH -e Profiles.err
+#SBATCH -o Profiles.out
+
+# LOAD MODULES AND CONDA ENVIRONMENTS
+ml apps/python3/2020.02
+conda activate anvio-7.1
+
+# RUN PIPELINE
+cd /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/
+for sample in `cat SAMPLE_LIST`;
+do anvi-profile -i /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/02_MAPPING/$sample/$sample.bam -c /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/03_CONTIGS_DATABASES/$sample/contigs.db -o /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/04_PROFILES/$sample --sample-name $sample -T 30;
+done
+```
+RUN TIME: 1 hour 12 minutes
+
+
+
+# BINNING
+
+I am going to use MetaBat2, Concoct, Maxbin2 to bin. Then I will use DasTool to summarize all of the binning results to be imported into the profiles for downstream refinement and application.
+
+First I am going to generate splits and coverages for each profile 
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=PT_Splits_and_Coverage
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=pthieringer@mines.edu
+#SBATCH -N 1            #Nodes
+#SBATCH -n 1           #Cores
+#SBATCH -A 2203121047
+#SBATCH --ntasks-per-node=16
+#SBATCH -t 3:00:00
+#SBATCH -e Splits_and_Coverage.err
+#SBATCH -o Splits_and_Coverage.out
+
+# LOAD MODULES AND CONDA ENVIRONMENTS
+ml apps/python3/2020.02
+conda activate anvio-7.1
+
+# RUN PIPELINE
+cd /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/
+for sample in `cat SAMPLE_LIST`;
+do anvi-export-splits-and-coverages -p /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/04_PROFILES/$sample/PROFILE.db -c /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/03_CONTIGS_DATABASES/$sample/contigs.db -o /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/03_CONTIGS_DATABASES/$sample/;
+done
+
+#JOB COMPLETE
+```
+RUN TIME: 1 hour
+
+
+Metabat2
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=PT_Metabat
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=pthieringer@mines.edu
+#SBATCH -N 1            #Nodes
+#SBATCH -n 1           #Cores
+#SBATCH -A 2203121047
+#SBATCH --ntasks-per-node=24
+#SBATCH -t 2:00:00
+#SBATCH -e Metabat.err
+#SBATCH -o Metabat.out
+
+# LOAD MODULES AND CONDA ENVIRONMENTS
+ml apps/python3/2020.02
+conda activate anvio-7.1
+
+# RUN PIPELINE
+cd /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/
+for sample in `cat SAMPLE_LIST`;
+do jgi_summarize_bam_contig_depths --outputDepth /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/05_BINNING/$sample/METABAT2/depth.txt /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/02_MAPPING/$sample/$sample.bam
+
+metabat2 -i /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/01_ASSEMBLIES/NON_ERROR/$sample/fixed_contigs.fasta -a /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/05_BINNING/$sample/METABAT2/depth.txt -o /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/05_BINNING/$sample/METABAT2/bins -t 24;
+done
+
+# JOB COMPLETE
+```
+RUN TIME: 1 hour
+
+
+CONCOCT
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=PT_CONCOCT
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=pthieringer@mines.edu
+#SBATCH -N 1            #Nodes
+#SBATCH -n 1           #Cores
+#SBATCH -A 2203121047
+#SBATCH --ntasks-per-node=24
+#SBATCH -t 24:00:00
+#SBATCH -e CONCOCT.err
+#SBATCH -o CONCOCT.out
+
+# LOAD MODULES AND CONDA ENVIRONMENTS
+ml apps/python3/2020.02
+conda activate anvio-7.1
+
+# RUN PIPELINE
+cd /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/
+for sample in `cat SAMPLE_LIST`;
+do cut_up_fasta.py /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/01_ASSEMBLIES/NON_ERROR/$sample/fixed_contigs.fasta -c 15000 -o 0 --merge_last -b /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/05_BINNING/$sample/CONCOCT/contigs_10K.bed > /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/05_BINNING/$sample/CONCOCT/contigs_10K.fa
+
+concoct_coverage_table.py /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/05_BINNING/$sample/CONCOCT/contigs_10K.bed /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/02_MAPPING/$sample/$sample.bam > /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/05_BINNING/$sample/CONCOCT/coverage_table.tsv
+
+mkdir /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/05_BINNING/$sample/CONCOCT/concoct_output
+
+concoct --composition_file /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/05_BINNING/$sample/CONCOCT/contigs_10K.fa --coverage_file /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/05_BINNING/$sample/CONCOCT/coverage_table.tsv -b /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/05_BINNING/$sample/CONCOCT/concoct_output --threads 24
+
+merge_cutup_clustering.py /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/05_BINNING/$sample/CONCOCT/concoct_output/clustering_gt1000.csv > /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/05_BINNING/$sample/CONCOCT/concoct_output/clustering_merged.csv
+
+mkdir /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/05_BINNING/$sample/CONCOCT/concoct_output/fasta_bins
+
+extract_fasta_bins.py /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/01_ASSEMBLIES/NON_ERROR/$sample/fixed_contigs.fasta /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/05_BINNING/$sample/CONCOCT/concoct_output/clustering_merged.csv --output_path /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/05_BINNING/$sample/CONCOCT/concoct_output/fasta_bins;
+done
+
+# JOB COMPLETE
+```
+RUN TIME: ~ 15 hours
+
+
+MAXBIN2
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=PT_MAXBIN2
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=pthieringer@mines.edu
+#SBATCH -N 1            #Nodes
+#SBATCH -n 1           #Cores
+#SBATCH -A 2203121047
+#SBATCH --ntasks-per-node=24
+#SBATCH -t 48:00:00
+#SBATCH -e MAXBIN2.err
+#SBATCH -o MAXBIN2.out
+
+# LOAD MODULES AND CONDA ENVIRONMENTS
+ml apps/python3/2020.02
+conda activate anvio-7.1
+
+# RUN PIPELINE
+cd /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/
+for sample in `cat SAMPLE_LIST`;
+do run_MaxBin.pl -thread 24 -contig /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/01_ASSEMBLIES/NON_ERROR/$sample/fixed_contigs.fasta -out /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/05_BINNING/$sample/MAXBIN2/maxbin -abund /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/03_CONTIGS_DATABASES/$sample/$sample-COVs.txt;
+done
+```
+RUN TIME: ~ 36 hours
+
+
+DASTOOL
+This program will take the binning results and refine them for redundant binning and also determining the quality of the bins. The input files need to be reformated for DASTool's purposes and then the software can be run.
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=PT_DASTOOL
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=pthieringer@mines.edu
+#SBATCH -N 1            #Nodes
+#SBATCH -n 1           #Cores
+#SBATCH -A 2203121047
+#SBATCH --cpus-per-task=16
+#SBATCH -t 24:00:00
+#SBATCH -e DASTOOL.err
+#SBATCH -o DASTOOL.out
+
+# LOAD MODULES AND CONDA ENVIRONMENTS
+ml apps/python3/2020.02
+conda activate anvio-7.1
+
+# RUN PIPELINE
+cd /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/
+for sample in `cat SAMPLE_LIST`;
+do Fasta_to_Scaffolds2Bin.sh -e fa -i /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/05_BINNING/$sample/METABAT2/ > /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/05_BINNING/$sample/DASTOOL/metabat2.contigs2bin.tsv
+
+Fasta_to_Scaffolds2Bin.sh -e fa -i /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/05_BINNING/$sample/CONCOCT/concoct_output/fasta_bins > /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/05_BINNING/$sample/DASTOOL/concoct.contigs2bin.tsv
+
+Fasta_to_Scaffolds2Bin.sh -e fasta -i /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/05_BINNING/$sample/MAXBIN2 > /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/05_BINNING/$sample/DASTOOL/maxbin2.contigs2bin.tsv
+
+DAS_Tool -i /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/05_BINNING/$sample/DASTOOL/metabat2.contigs2bin.tsv,/u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/05_BINNING/$sample/DASTOOL/concoct.contigs2bin.tsv,/u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/05_BINNING/$sample/DASTOOL/maxbin2.contigs2bin.tsv -l metabat2,concoct,maxbin2 -c /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/01_ASSEMBLIES/NON_ERROR/$sample/fixed_contigs.fasta -o /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/05_BINNING/$sample/DASTOOL/DasTool_Results --write_bin_evals --write_bins --threads 16;
+done
+```
+RUN TIME: ~ 40 minutes
+
+
+Now the files need to be fixed up the files to be importable into Anvi'o. Everything needs a prefix. I'm doing this the long way of adding a prefix to everything and then removing it later on with the appropriate prefix. Everything needs to start with an ASCII character first, not a digit. Again, bear with the naive bioinformatician...there is definitely a faster way of doing this that I have likely discovered with more experience. I made sure to keep the prefix of which tool the bins were generated with and DASTool decided to keep as a personal preference. Though you could simply just name everything "bin_#" if you choose.
+```{bash}
+# This was done in the DASTOOL folders of each sample.
+
+cp DasTool_Results_DASTool_scaffolds2bin.txt DasTool_anvi_collection.txt
+awk '{$2="bin_"$2; print}' DasTool_anvi_collection.txt > fix1.txt
+sed 's/bin_maxbin./maxbin_/g' fix1.txt > fix2.txt
+sed 's/bin_bins./metabat_/g' fix2.txt > fix3.txt
+awk -v OFS='\t' '{ print $1, $2 }' fix3.txt > fix4.txt
+```
+
+
+Importing the collection into each anvio profile database.
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=PT_Import_Dastool
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=pthieringer@mines.edu
+#SBATCH -N 1            #Nodes
+#SBATCH -n 1           #Cores
+#SBATCH -A 2203121047
+#SBATCH --cpus-per-task=4
+#SBATCH -t 2:00:00
+#SBATCH -e Import_DASTOOL.err
+#SBATCH -o ImporT_DASTOOL.out
+
+# LOAD MODULES AND CONDA ENVIRONMENTS
+ml apps/python3/2020.02
+conda activate anvio-7.1
+
+# RUN PIPELINE
+cd /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/
+for sample in `cat SAMPLE_LIST`;
+do anvi-import-collection /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/05_BINNING/$sample/DASTOOL/fix4.txt -p /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/04_PROFILES/$sample/PROFILE.db -c /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/03_CONTIGS_DATABASES/$sample/contigs.db --collection-name DASTool --contigs-mode;
+done
+```
+RUN TIME: 30 Seconds
+
+
+
+# SUMMARIZE DATAA
+I will summarize my data in the DASTool collection in order to be able to inspect all the bins before refinement. This can be run again after refinement in order to look at how the bins differ.
+
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=PT_Anvi_Summarize
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=pthieringer@mines.edu
+#SBATCH -N 1            #Nodes
+#SBATCH -n 1           #Cores
+#SBATCH -A 2203121047
+#SBATCH --cpus-per-task=12
+#SBATCH -t 6:00:00
+#SBATCH -e Anvi_Summarize.err
+#SBATCH -o Anvi_Summarize.out
+
+# LOAD MODULES AND CONDA ENVIRONMENTS
+ml apps/python3/2020.02
+conda activate anvio-7.1
+
+# RUN PIPELINE
+cd /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/
+for sample in `cat SAMPLE_LIST`;
+do anvi-summarize -p /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/04_PROFILES/$sample/PROFILE.db -c /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/03_CONTIGS_DATABASES/$sample/contigs.db -o /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/04_PROFILES/$sample/INITIAL_SUMMARY -C DASTool --report-aa-seqs-for-gene-calls;
+done
+```
+RUN TIME: ~1 hour
+
+
+# REFINING BINS
+Going through bin by bin to refine each MAG before running pangenomics or other tests to see what is going on in my MAGs/metagenomes. This was done manually through Anvi'o, and it should be noted there are other programs that can do this for you without manual curation.
+
+```{bash}
+anvi-refine -p PROFILE.db -c path/to/contigs.db -C DASTool -b bin_#
+```
+
+
+
+From here, I noted which MAGs belonged to Methanobacterium and Anaerolineaceae before performing a pangenomic analyses and other tests. The pipeline for producing a pangenome of the Methanobacterium MAGs will be provided below, but additional analyses will be shared in the other files is those analyses are of interest.
+
+
+# PANGENOMICS WORKFLOW
+
+## Setting up the pangenome storage databases
+I will only be working with internal genomes (the MAGs I've identified within my samples). I will work with external genomes for the functional enrichment analysis. 
+
+First going to generate the storage databases by defining the paths of all the Methanobacterium MAGs. This interal MAGS file lists the path of the 8 MAGs from the metagenomes for use downstream.
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=PT_Pangenome_Storage
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=pthieringer@mines.edu
+#SBATCH -N 1            #Nodes
+#SBATCH -n 1           #Cores
+#SBATCH -A 2203121047
+#SBATCH --cpus-per-task=8
+#SBATCH -t 1:00:00
+#SBATCH -e Storage_DB.err
+#SBATCH -o Storage_DB.out
+
+# LOAD MODULES AND CONDA ENVIRONMENTS
+ml apps/python3/2020.02
+conda activate anvio-7.1
+
+# RUN PIPELINE
+cd /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/06_PANGENOMICS
+
+anvi-gen-genomes-storage -i internal_methano_MAGs.txt -o METHANO_GENOMES.db
+
+# JOB COMPLETE
+```
+RUN TIME: 1.5 minutes
+
+
+## Setting up a pangenome analysis
+
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=PT_Pangenome_Analysis
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=pthieringer@mines.edu
+#SBATCH -N 1            #Nodes
+#SBATCH -n 1           #Cores
+#SBATCH -A 2203121047
+#SBATCH --cpus-per-task=8
+#SBATCH -t 2:00:00
+#SBATCH -e Pangenome_Analysis.err
+#SBATCH -o Pangenome_Analysis.out
+
+# LOAD MODULES AND CONDA ENVIRONMENTS
+ml apps/python3/2020.02
+conda activate anvio-7.1
+
+# RUN PIPELINE
+cd /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/06_PANGENOMICS
+
+anvi-pan-genome -g METHANO_GENOMES.db --project-name Methanobacterium_Pan --output-dir METHANO_PANGENOME --num-threads 4 --minbit 0.5 --mcl-inflation 6 --use-ncbi-blast
+
+# JOB COMPLETE
+```
+RUN TIME: 3 minutes
+
+
+## Computing the average nucleotide identity (ANI) of all of the MAGS
+
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=PT_ANI_compute
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=pthieringer@mines.edu
+#SBATCH -N 1            #Nodes
+#SBATCH -n 1           #Cores
+#SBATCH -A 2203121047
+#SBATCH --cpus-per-task=8
+#SBATCH -t 2:00:00
+#SBATCH -e ANI_Compute.err
+#SBATCH -o ANI_Compute.out
+
+# LOAD MODULES AND CONDA ENVIRONMENTS
+ml apps/python3/2020.02
+conda activate anvio-7.1
+
+# RUN PIPELINE
+cd /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/06_PANGENOMICS
+
+anvi-compute-genome-similarity --internal-genomes internal_methano_MAGs.txt --program pyANI --output-dir ANI --num-threads 8 --pan-db METHANO_PANGENOME/Methanobacterium_Pan-PAN.db
+```
+RUN TIME: 30 minutes
+
+
+## Visualizing the pangenome
+
+This code below allows you to visualize the pangenome. How you curate and display the pagnenome was done through personal decisions to make the best visuallilzation of all the MAGs.
+```{bash}
+anvi-display-pan -p METHANO_PANGENOME/Methanobacterium_Pan-PAN.db -g METHANO_GENOMES.db
+```
+
+
+## Functional Enrichment Analysis
+This analysis will allow you to see which gene clusters/genes are more enriched (core) to a specific group that you define. In order to contrast the MAGs from BA3A (our most hyperalkaline well) to other Methanobactierum genomes, we downloaded what was publicly available and then recreated the pangnome pipeline. Then the specific Anvi'o function 'anvi-compute-functional-enrichment-in-pan' was run.
+
+First downloading the external genomes. These external genomes were then concatenated with their metadata into an external genomes file needed for Anvi'o.
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=PT_Download_Methano_Genomes
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=pthieringer@mines.edu
+#SBATCH -N 2            #Nodes
+#SBATCH -n 36           #Cores
+#SBATCH -t 2:00:00
+#SBATCH -A 2203121047
+#SBATCH --ntasks-per-node=36
+#SBATCH -e Methano_Download.err
+#SBATCH -o Methano_Download.out
+
+# LOAD MODULES AND CONDA ENVIRONMENTS
+ml apps/python3/anaconda
+conda activate NCBI
+
+# RUN PIPELINE
+cd /u/sa/br/pthieringer/scratch/09_ABSCICON_REFINEMENT/DOWNLOADED_GENOMES/METHANOS/REFSEQ
+
+ncbi-genome-download -g methanobacterium archaea
+ncbi-genome-download -g methanobacterium -s genbank archaea
+```
+
+Now running the pangenome workflow with the external genomes to create a new pangenome.
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=PT_Pangenome_External
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=pthieringer@mines.edu
+#SBATCH -N 1            #Nodes
+#SBATCH -n 1           #Cores
+#SBATCH -A 2203121047
+#SBATCH --cpus-per-task=8
+#SBATCH -t 1:00:00
+#SBATCH -e External_Pangenome.err
+#SBATCH -o External_Pangenome.out
+
+# LOAD MODULES AND CONDA ENVIRONMENTS
+ml apps/python3/2020.02
+conda activate anvio-7.1
+
+# RUN PIPELINE
+cd /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/06_PANGENOMICS
+
+anvi-gen-genomes-storage -i internal_methano_MAGs.txt -e external_genomes.txt -o METHANO_GENOMES_FULL.db
+
+anvi-pan-genome -g METHANO_GENOMESFULL.db --project-name Methanobacterium_Pan_FULL --output-dir METHANO_PANGENOMe_FULL --num-threads 4 --minbit 0.5 --mcl-inflation 6 --use-ncbi-blast
+```
+
+
+This additional layer that denotes which MAGs belong to BA3A and which MAGs or genomes are considered "other" were imported into the pangenome.
+```{bash}
+anvi-import-misc-data ba3a.txt -p Methanobacterium_Pan-PAN.db --target-data-table layers
+```
+
+
+The functional enrichment was conducted as below. The file generated can then be used to distinguish which genes are functionally enriched in the BA3A MAGs.
+```{bash}
+!/bin/bash
+#SBATCH --job-name=PT_Functional_Enrichment
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=pthieringer@mines.edu
+#SBATCH -N 1            #Nodes
+#SBATCH -n 1           #Coress
+#SBATCH -A 2203121047
+#SBATCH --cpus-per-task=24
+#SBATCH -t 6:00:00
+#SBATCH -e Functional_Enrichment.err
+#SBATCH -o Functional_Enrichment.out
+
+# LOAD MODULES AND CONDA ENVIRONMENTS
+ml apps/python3/2020.02
+conda activate anvio-7.1
+
+# RUN PIPELINE
+cd /u/sa/br/pthieringer/scratch/INDIVIDUAL_ASSEMBLY/06_PANGENOMICS/EXTERNAL_METHANO_GENOMES
+
+anvi-compute-functional-enrichment-in-pan -p METHANO_FULL_PANGENOME/Methanobacterium_Full_Pan_PAN.db -g METHANO_FULL_GENOMES.db -o functional_enrichment_oman.txt --category-variable ba3a --annotation-source COG20_FUNCTION
+```
+RUN TIME: 2.5 hours
+
+
+From here, pangenome figures were manually curated and then exported. Other figures were generated in R based off the gene presence/absence and copy number from the supplementary tables that were provided as a result of this paper. Additional files are uploaded to the Github repository for others to see how some of the figures were created.
+
+
+
